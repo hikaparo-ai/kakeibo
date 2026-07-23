@@ -116,6 +116,28 @@ header{padding:calc(18px + env(safe-area-inset-top)) 0 12px;display:flex;align-i
 .sheetacts{display:flex;gap:8px;margin-top:6px}
 .sheetacts #btnDel{flex:none;padding-left:22px;padding-right:22px}
 .sheetacts #btnSave{flex:1}
+/* 品目エディタ */
+#lineSum{float:right;font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--mute)}
+#lines{border-top:1px dashed var(--line)}
+.ln{display:flex;align-items:center;gap:6px;border-bottom:1px dashed var(--line);padding:5px 0}
+.ln input{background:transparent;border:none;padding:6px 4px;border-radius:3px;font-size:14px}
+.ln input:focus{background:var(--paper);outline:none}
+.ln .n{flex:1;min-width:0}
+.ln .p{width:88px;text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:14px;flex:none}
+.ln .x{flex:none;width:26px;height:26px;color:var(--mute);font-size:16px;line-height:1}
+.ln .x:active{color:var(--stamp)}
+.ln.minus .p{color:var(--stamp)}
+.lineacts{display:flex;gap:8px;margin-top:9px}
+.lineacts button{font-size:12px;color:var(--carbon);padding:7px 11px;border:1px solid var(--line);border-radius:var(--r)}
+.lineacts button:active{background:var(--paper)}
+.noln{color:var(--mute);font-size:12.5px;padding:11px 2px}
+/* 一覧の品目表示 */
+.item{flex-wrap:wrap}
+.det{flex-basis:100%;margin:8px 0 0;padding-top:8px;border-top:1px dashed var(--line);font-size:12.5px;color:var(--mute)}
+.det div{display:flex;gap:10px;padding:2px 0}
+.det span{margin-left:auto;font-family:var(--mono);font-variant-numeric:tabular-nums;flex:none}
+.det .mn span{color:var(--stamp)}
+.cnt{font-family:var(--mono);font-size:9px;color:var(--mute);flex:none;letter-spacing:.06em}
 .txt{color:var(--stamp);font-size:13px;padding:14px 10px}
 .hint{font-size:11.5px;color:var(--mute);line-height:1.7;margin:-6px 0 14px}
 .hint a{color:var(--carbon)}
@@ -191,6 +213,9 @@ nav button.on i{background:var(--carbon)}
       <button class="btn ghost" id="btnCsvAll">CSVで書き出す</button>
       <button class="btn ghost" id="btnCsvBiz">経費だけCSV</button>
     </div>
+    <div class="acts" style="grid-template-columns:1fr;margin-top:-14px">
+      <button class="btn ghost" id="btnCsvLines">品目ごとのCSV</button>
+    </div>
   </section>
 
   <!-- ============ 設定 ============ -->
@@ -263,6 +288,14 @@ nav button.on i{background:var(--carbon)}
       <div class="f">
         <label for="fCat">カテゴリ</label>
         <select id="fCat"></select>
+      </div>
+    </div>
+    <div class="f" id="linesWrap">
+      <label>品目 <span id="lineSum"></span></label>
+      <div id="lines"></div>
+      <div class="lineacts">
+        <button type="button" id="btnAddLine">＋ 行を足す</button>
+        <button type="button" id="btnSumLines">合計に反映</button>
       </div>
     </div>
     <div class="chk">
@@ -351,16 +384,27 @@ function render(){
         const dayTotal = items.filter(x=>x.date===day).reduce((s,x)=>s+(+x.amount||0),0);
         html += '<div class="daygrp"><div class="daylabel">'+(d.getMonth()+1)+"/"+d.getDate()+" ("+w+")<span>"+yen(dayTotal)+"</span></div>";
       }
-      html += '<button class="item" data-id="'+i.id+'">'
+      html += '<div class="item" data-id="'+i.id+'">'
         + '<span class="tag">'+esc(i.cat||"その他")+"</span>"
         + '<span class="nm">'+esc(i.store||"（店名なし）")+"</span>"
         + (i.biz?'<span class="biz">経費</span>':"")
-        + '<span class="am">'+yen(i.amount)+"</span></button>";
+        + ((i.lines&&i.lines.length)?'<span class="cnt">'+i.lines.length+"品</span>":"")
+        + '<span class="am">'+yen(i.amount)+"</span>"
+        + ((i.lines&&i.lines.length)?'<div class="det hidden">'+i.lines.map(l=>'<div class="'+((+l.price<0)?"mn":"")+'">'+esc(l.name)+"<span>"+yen(l.price)+"</span></div>").join("")+"</div>":"")
+        + "</div>";
     });
     html += "</div>";
     list.innerHTML = html;
     list.querySelectorAll(".item").forEach(el=>{
-      el.onclick = ()=> openSheet(S.items.find(x=>x.id===el.dataset.id));
+      const det = el.querySelector(".det");
+      el.onclick = ev =>{
+        // 品目があれば1タップで開閉、もう一度タップで編集
+        if(det && det.classList.contains("hidden") && !ev.target.closest(".det")){
+          det.classList.remove("hidden"); return;
+        }
+        openSheet(S.items.find(x=>x.id===el.dataset.id));
+        if(det) det.classList.add("hidden");
+      };
     });
   }
 
@@ -375,6 +419,49 @@ function render(){
 }
 function esc(s){ return String(s??"").replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
+/* ============ 品目エディタ ============ */
+function lineRow(name, price){
+  const el = document.createElement("div");
+  el.className = "ln" + ((+price<0) ? " minus" : "");
+  const n = document.createElement("input"); n.className="n"; n.type="text"; n.placeholder="品目名"; n.value = name||"";
+  const p = document.createElement("input"); p.className="p"; p.type="number"; p.inputMode="numeric"; p.placeholder="0";
+  p.value = (price===0||price) ? price : "";
+  const x = document.createElement("button"); x.className="x"; x.type="button"; x.textContent="×"; x.setAttribute("aria-label","この行を消す");
+  x.onclick = ()=>{ el.remove(); updLineSum(); };
+  p.oninput = ()=>{ el.classList.toggle("minus", +p.value<0); updLineSum(); };
+  el.append(n,p,x);
+  return el;
+}
+function setLines(arr){
+  const box = $("#lines"); box.innerHTML = "";
+  (arr||[]).forEach(l => box.append(lineRow(l.name, l.price)));
+  updLineSum();
+}
+function getLines(){
+  return [...$("#lines").querySelectorAll(".ln")].map(el=>({
+    name: el.querySelector(".n").value.trim(),
+    price: parseInt(el.querySelector(".p").value,10)
+  })).filter(l => l.name || Number.isFinite(l.price))
+     .map(l => ({name:l.name, price: Number.isFinite(l.price) ? l.price : 0}));
+}
+function updLineSum(){
+  const ls = getLines();
+  const box = $("#lines");
+  if(!ls.length && !box.children.length){ box.innerHTML = '<div class="noln">品目はまだありません。レシートを撮ると自動で入ります。</div>'; }
+  const sum = ls.reduce((s,l)=>s+(+l.price||0),0);
+  $("#lineSum").textContent = ls.length ? ls.length + "品 / " + yen(sum) : "";
+}
+$("#btnAddLine").onclick = ()=>{
+  const box = $("#lines");
+  if(box.querySelector(".noln")) box.innerHTML = "";
+  const r = lineRow("", ""); box.append(r); r.querySelector(".n").focus(); updLineSum();
+};
+$("#btnSumLines").onclick = ()=>{
+  const sum = getLines().reduce((s,l)=>s+(+l.price||0),0);
+  if(!sum){ toast("品目の金額が入っていません"); return; }
+  $("#fAmount").value = sum; toast("合計を " + yen(sum) + " にしました");
+};
+
 /* ============ シート ============ */
 function openSheet(item){
   editId = item ? item.id : null;
@@ -384,6 +471,7 @@ function openSheet(item){
   $("#fDate").value  = item ? item.date : iso(new Date());
   $("#fCat").value   = item ? (item.cat||"その他") : "食費";
   $("#fBizChk").checked = item ? !!item.biz : false;
+  setLines(item ? item.lines : []);
   $("#btnDel").classList.toggle("hidden", !item);
   $("#err").classList.add("hidden");
   $("#scanBox").classList.add("hidden");
@@ -404,6 +492,7 @@ $("#btnSave").onclick = ()=>{
     date: $("#fDate").value || iso(new Date()),
     cat: $("#fCat").value,
     biz: $("#fBizChk").checked,
+    lines: getLines(),
     t: Date.now()
   };
   if(editId){ S.items = S.items.map(x=> x.id===editId ? Object.assign(x,rec) : x); }
@@ -443,10 +532,14 @@ function shrink(file){
 }
 
 const PROMPT = `このレシート画像を読み取り、JSONだけを返してください。前置きもコードブロックも不要です。
-{"store":"店名","date":"YYYY-MM-DD","amount":支払total金額の数値,"cat":"カテゴリ"}
+{"store":"店名","date":"YYYY-MM-DD","amount":支払合計の数値,"cat":"カテゴリ","items":[{"name":"品目名","price":金額の数値,"qty":個数}]}
 ・amount は割引・税込み後の実際の支払合計。数値のみ（カンマや円は付けない）。
+・items にはレシートに印字されている商品を上から順に、1行1品目で**すべて**入れる。省略や要約はしない。
+・price はその行の金額（数量が2以上ならその行の合計額）。qty は個数、書いていなければ 1。
+・値引き・割引の行はマイナスの price で入れる。小計・税・合計・預り金・お釣り・ポイントの行は items に入れない。
+・品目名はレシートの表記のまま。略語（例：ﾆﾝｼﾞﾝ）は一般的な表記に直してよい。
 ・date が読めなければ null。
-・cat は次から1つ選ぶ: ${CATS.join(" / ")}
+・cat はレシート全体に対して次から1つ選ぶ: ${CATS.join(" / ")}
 ・スーパー、コンビニ、飲食店は「食費」。ドラッグストアや100均の日用品は「日用品」。ガソリンスタンドや駐輪場は「交通・ガソリン」。`;
 
 /* --- キーで実際に使えるモデルを調べて、良い順に並べる --- */
@@ -564,8 +657,13 @@ function fillFromReceipt(d){
   if(d.store)  $("#fStore").value  = String(d.store).slice(0,40);
   if(d.date && /^\d{4}-\d{2}-\d{2}$/.test(d.date)) $("#fDate").value = d.date;
   if(d.cat && CATS.includes(d.cat)) $("#fCat").value = d.cat;
+  const ls = Array.isArray(d.items) ? d.items.map(x=>({
+    name: String((x && x.name) || "").slice(0,40),
+    price: parseInt(String((x && x.price) !== undefined ? x.price : "").replace(/[^\d-]/g,""),10) || 0
+  })).filter(x=>x.name) : [];
+  setLines(ls);
   $("#sheetTitle").textContent = "読み取り結果を確認";
-  toast("読めました。金額を確認してください");
+  toast(ls.length ? ls.length + "品 読めました。合計を確認してください" : "読めました。金額を確認してください");
 }
 
 /* ============ タブ ============ */
@@ -624,6 +722,17 @@ function csv(items, name){
 }
 $("#btnCsvAll").onclick = ()=> csv(monthItems(), "kakeibo-"+cur.getFullYear()+pad(cur.getMonth()+1)+".csv");
 $("#btnCsvBiz").onclick = ()=> csv(S.items.filter(i=>i.biz), "keihi-all.csv");
+$("#btnCsvLines").onclick = ()=>{
+  const rows = [["日付","店名","カテゴリ","品目","金額","経費"]];
+  monthItems().slice().sort((a,b)=>a.date<b.date?-1:1).forEach(i=>{
+    (i.lines&&i.lines.length ? i.lines : [{name:"（品目なし）",price:i.amount}])
+      .forEach(l => rows.push([i.date, i.store||"", i.cat||"", l.name, l.price, i.biz?"○":""]));
+  });
+  if(rows.length===1){ toast("書き出すものがありません"); return; }
+  const body = rows.map(r=>r.map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(",")).join("\r\n");
+  download("hinmoku-"+cur.getFullYear()+pad(cur.getMonth()+1)+".csv", "\uFEFF"+body, "text/csv;charset=utf-8");
+  toast("書き出しました");
+};
 $("#btnBackup").onclick = ()=>{
   download("denpyo-backup-"+iso(new Date())+".json", JSON.stringify({items:S.items,budget:S.budget},null,1), "application/json");
   toast("バックアップを保存しました");
