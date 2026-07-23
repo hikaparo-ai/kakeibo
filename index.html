@@ -253,6 +253,7 @@ nav button.on i{background:var(--carbon)}
       </div>
       <input type="file" id="fileRestore" accept="application/json,.json" class="hidden">
     </div>
+    <p class="hint" style="text-align:center;margin-top:14px">バージョン 1.3 — 品目の読み取りに対応</p>
   </section>
 </div>
 
@@ -762,8 +763,30 @@ function fillSettings(){
 $("#fCat").innerHTML = CATS.map(c=>'<option>'+c+'</option>').join("");
 fillSettings();
 render();
+
+/* --- 更新の受け取り：新しい版が来たら自動で読み直す --- */
 if("serviceWorker" in navigator){
-  window.addEventListener("load", ()=> navigator.serviceWorker.register("./sw.js").catch(()=>{}));
+  window.addEventListener("load", async ()=>{
+    try{
+      const reg = await navigator.serviceWorker.register("./sw.js");
+      reg.addEventListener("updatefound", ()=>{
+        const nw = reg.installing;
+        if(!nw) return;
+        nw.addEventListener("statechange", ()=>{
+          if(nw.state === "installed" && navigator.serviceWorker.controller){
+            let done = false;
+            try{ done = sessionStorage.getItem("denpyo.reloaded") === "1"; }catch(e){}
+            if(done) return;
+            try{ sessionStorage.setItem("denpyo.reloaded","1"); }catch(e){}
+            toast("新しい版に更新します…");
+            setTimeout(()=>location.reload(), 600);
+          }
+        });
+      });
+      setInterval(()=>reg.update().catch(()=>{}), 30*60*1000);
+      reg.update().catch(()=>{});
+    }catch(e){}
+  });
 }
 </script>
 </body>
