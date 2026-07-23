@@ -210,10 +210,11 @@ nav button.on i{background:var(--carbon)}
         無料枠のデータはGoogleの品質改善に使われる可能性があります。見られたくないレシートは手入力してください。
       </p>
       <div class="f">
-        <label for="inModel">モデル名</label>
-        <input id="inModel" type="text" placeholder="gemini-3.5-flash" autocomplete="off">
+        <label for="inModel">読み取りに使うモデル</label>
+        <input id="inModel" type="text" placeholder="未設定" autocomplete="off">
       </div>
-      <p class="hint">読み取りに失敗が続くときは、AI Studioで使えるモデル名に書き換えてください。</p>
+      <button class="btn ghost" id="btnCheck" style="width:100%;margin-bottom:12px">接続を確認して自動で選ぶ</button>
+      <div id="checkOut" class="hint hidden" style="margin-top:-4px"></div>
       <button class="btn" id="btnSaveSet" style="width:100%">保存する</button>
     </div>
 
@@ -287,8 +288,9 @@ const store = {
   get(k){ try{ return localStorage.getItem(k); }catch(e){ return k in mem ? mem[k] : null; } },
   set(k,v){ try{ localStorage.setItem(k,v); }catch(e){ mem[k]=v; } }
 };
-let S = { items:[], budget:60000, apiKey:"", model:"gemini-3.5-flash" };
+let S = { items:[], budget:60000, apiKey:"", model:"" };
 try{ const raw = store.get(KEY); if(raw) S = Object.assign(S, JSON.parse(raw)); }catch(e){}
+if(!S.v2){ S.model = ""; S.v2 = 1; }   // 旧バージョンの決め打ちモデル名を捨てて再検出させる
 const save = () => store.set(KEY, JSON.stringify(S));
 
 /* ============ ヘルパ ============ */
@@ -447,6 +449,67 @@ const PROMPT = `このレシート画像を読み取り、JSONだけを返して
 ・cat は次から1つ選ぶ: ${CATS.join(" / ")}
 ・スーパー、コンビニ、飲食店は「食費」。ドラッグストアや100均の日用品は「日用品」。ガソリンスタンドや駐輪場は「交通・ガソリン」。`;
 
+/* --- キーで実際に使えるモデルを調べて、良い順に並べる --- */
+async function listModels(){
+  const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models?key="+encodeURIComponent(S.apiKey));
+  const j = await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(jpError(r.status, j.error && j.error.message));
+  return (j.models||[])
+    .filter(m => (m.supportedGenerationMethods||[]).includes("generateContent"))
+    .map(m => String(m.name||"").replace(/^models\//,""));
+}
+function rankModels(names){
+  const score = n => {
+    if(!/^gemini/.test(n)) return -99;
+    if(/image|embedding|tts|live|audio|robotics|thinking-exp|learnlm/.test(n)) return -99;
+    let s = 0;
+    if(/flash/.test(n)) s += 10;          // 速くて安い系を優先
+    if(/lite/.test(n))  s -= 1;           // liteは読み取り精度がやや落ちる
+    if(/pro/.test(n))   s -= 3;           // proは無料枠が厳しい
+    if(/preview|exp|-\d{2}-\d{2}/.test(n)) s -= 6;
+    s += parseFloat((n.match(/gemini-(\d+(?:\.\d+)?)/)||[])[1] || 0);
+    return s;
+  };
+  return names.map(n => [n, score(n)]).filter(x => x[1] > 0)
+              .sort((a,b) => b[1]-a[1]).map(x => x[0]);
+}
+function jpError(status, msg){
+  const m = String(msg||"");
+  if(status===400 && /API key not valid|API_KEY_INVALID/i.test(m)) return "APIキーが正しくありません。設定を見直してください。";
+  if(status===403) return "このキーでは使えません。AI Studioでキーを作り直してください。";
+  if(status===404) return "そのモデルが見つかりません。「接続を確認」を押してください。";
+  if(status===429) return "今日の無料枠を使い切ったようです。時間をおくか、設定でモデルを変えてください。";
+  if(status>=500) return "Google側が混んでいます。少し待って撮り直してください。";
+  return m || ("通信エラー HTTP " + status);
+}
+
+/* --- 1モデルで1回試す --- */
+async function askGemini(model, b64){
+  const url = "https://generativelanguage.googleapis.com/v1beta/models/"+encodeURIComponent(model)+":generateContent?key="+encodeURIComponent(S.apiKey);
+  const r = await fetch(url, {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({
+      contents:[{parts:[{inline_data:{mime_type:"image/jpeg", data:b64}}, {text:PROMPT}]}],
+      generationConfig:{ temperature:0, maxOutputTokens:4096 }
+    })
+  });
+  const j = await r.json().catch(()=>({}));
+  if(!r.ok){
+    const e = new Error(jpError(r.status, j.error && j.error.message));
+    e.status = r.status; throw e;
+  }
+  const c = (j.candidates||[])[0] || {};
+  const txt = ((c.content && c.content.parts) || []).map(p=>p.text||"").join("");
+  const m = txt.match(/\{[\s\S]*\}/);
+  if(!m){
+    const e = new Error(c.finishReason === "SAFETY"
+      ? "この画像は読み取り対象外と判定されました。"
+      : "文字を読み取れませんでした。明るい場所で、影を入れずに撮り直してください。");
+    e.soft = true; throw e;
+  }
+  return JSON.parse(m[0]);
+}
+
 async function scan(file){
   editId = null;
   $("#sheetTitle").textContent = "レシートを読む";
@@ -456,33 +519,53 @@ async function scan(file){
   $("#sheet").classList.add("on"); $("#veil").classList.add("on");
   try{
     const b64 = await shrink(file);
-    const url = "https://generativelanguage.googleapis.com/v1beta/models/"+encodeURIComponent(S.model||"gemini-3.5-flash")+":generateContent?key="+encodeURIComponent(S.apiKey);
-    const r = await fetch(url,{
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({
-        contents:[{parts:[{inline_data:{mime_type:"image/jpeg",data:b64}},{text:PROMPT}]}],
-        generationConfig:{temperature:0, maxOutputTokens:400}
-      })
-    });
-    const j = await r.json();
-    if(!r.ok) throw new Error((j.error && j.error.message) || ("HTTP "+r.status));
-    const txt = ((j.candidates||[])[0]?.content?.parts||[]).map(p=>p.text||"").join("");
-    const m = txt.match(/\{[\s\S]*\}/);
-    if(!m) throw new Error("読み取り結果を解釈できませんでした");
-    const d = JSON.parse(m[0]);
-    openSheet(null);
-    if(d.amount) $("#fAmount").value = parseInt(String(d.amount).replace(/[^\d]/g,""),10) || "";
-    if(d.store)  $("#fStore").value  = String(d.store).slice(0,40);
-    if(d.date && /^\d{4}-\d{2}-\d{2}$/.test(d.date)) $("#fDate").value = d.date;
-    if(d.cat && CATS.includes(d.cat)) $("#fCat").value = d.cat;
-    $("#sheetTitle").textContent = "読み取り結果を確認";
-    toast("読めました。金額を確認してください");
+
+    // 使うモデルの候補を用意（未設定・失敗時はキーから自動で調べる）
+    let tries = S.model ? [S.model] : [];
+    let listed = null;
+    const expand = async () => {
+      if(listed) return listed;
+      $("#scanMsg").textContent = "使えるモデルを探しています…";
+      listed = rankModels(await listModels());
+      return listed;
+    };
+    if(!tries.length) tries = (await expand()).slice(0,3);
+
+    let last = null;
+    for(let i=0; i<6 && i<tries.length; i++){
+      try{
+        const d = await askGemini(tries[i], b64);
+        if(S.model !== tries[i]){ S.model = tries[i]; save(); fillSettings(); }
+        return fillFromReceipt(d);
+      }catch(err){
+        last = err;
+        if(err.soft) throw err;                       // 画像の問題なので他モデルでも同じ
+        if(err.status===404 || err.status===400){     // モデル名の問題 → 候補を広げる
+          const more = (await expand()).filter(n => !tries.includes(n));
+          tries = tries.concat(more.slice(0,3));
+          $("#scanMsg").textContent = "別のモデルで試しています…";
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw last || new Error("読み取りに失敗しました");
   }catch(err){
     openSheet(null);
     $("#sheetTitle").textContent = "手で入力";
-    $("#err").textContent = "読み取れませんでした：" + err.message + " — 手で入力できます。";
+    $("#err").textContent = err.message + " 金額だけ手で入れて保存できます。";
     $("#err").classList.remove("hidden");
   }
+}
+
+function fillFromReceipt(d){
+  openSheet(null);
+  if(d.amount) $("#fAmount").value = parseInt(String(d.amount).replace(/[^\d]/g,""),10) || "";
+  if(d.store)  $("#fStore").value  = String(d.store).slice(0,40);
+  if(d.date && /^\d{4}-\d{2}-\d{2}$/.test(d.date)) $("#fDate").value = d.date;
+  if(d.cat && CATS.includes(d.cat)) $("#fCat").value = d.cat;
+  $("#sheetTitle").textContent = "読み取り結果を確認";
+  toast("読めました。金額を確認してください");
 }
 
 /* ============ タブ ============ */
@@ -499,8 +582,26 @@ $("#nextM").onclick = ()=>{ cur.setMonth(cur.getMonth()+1); render(); };
 $("#btnSaveSet").onclick = ()=>{
   S.budget = parseInt($("#inBudget").value,10) || 0;
   S.apiKey = $("#inKey").value.trim();
-  S.model  = $("#inModel").value.trim() || "gemini-3.5-flash";
+  S.model  = $("#inModel").value.trim();
   save(); render(); toast("保存しました");
+};
+
+$("#btnCheck").onclick = async ()=>{
+  const out = $("#checkOut");
+  S.apiKey = $("#inKey").value.trim();
+  out.classList.remove("hidden");
+  if(!S.apiKey){ out.innerHTML = '<span style="color:var(--stamp)">先にAPIキーを入れてください。</span>'; return; }
+  out.textContent = "確認しています…";
+  $("#btnCheck").disabled = true;
+  try{
+    const ranked = rankModels(await listModels());
+    if(!ranked.length) throw new Error("このキーで使える画像対応モデルが見つかりませんでした。");
+    S.model = ranked[0]; save(); fillSettings();
+    out.innerHTML = '✓ 接続できました。<b>'+esc(ranked[0])+'</b> を使います。'
+      + (ranked.length>1 ? '<br>ほかに使える候補：' + ranked.slice(1,4).map(esc).join(" / ") : "");
+  }catch(err){
+    out.innerHTML = '<span style="color:var(--stamp)">'+esc(err.message)+'</span>';
+  }finally{ $("#btnCheck").disabled = false; }
 };
 
 /* ============ 書き出し・バックアップ ============ */
